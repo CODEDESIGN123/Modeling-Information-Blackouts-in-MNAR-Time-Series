@@ -59,8 +59,8 @@ def load_panel(
     m_t : np.ndarray, shape (T, D), dtype=np.uint8
         Binary missingness matrix: 1 = missing, 0 = observed.
     meta : dict or None
-        Always returned as the third element. When 'return_meta' is
-        False, this is 'None'. When 'return_meta' is True, this
+        Always returned as the third element. When ``return_meta`` is
+        False, this is ``None``. When ``return_meta`` is True, this
         dict contains:
             - "timestamps": np.ndarray of pandas.Timestamp, shape (T,)
             - "detectors":  np.ndarray of detector IDs (strings), shape (D,)
