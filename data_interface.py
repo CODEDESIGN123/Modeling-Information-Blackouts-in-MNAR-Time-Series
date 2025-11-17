@@ -59,7 +59,9 @@ def load_panel(
     m_t : np.ndarray, shape (T, D), dtype=np.uint8
         Binary missingness matrix: 1 = missing, 0 = observed.
     meta : dict or None
-        Only returned if return_meta=True. Contains:
+        Always returned as the third element. When 'return_meta' is
+        False, this is 'None'. When 'return_meta' is True, this
+        dict contains:
             - "timestamps": np.ndarray of pandas.Timestamp, shape (T,)
             - "detectors":  np.ndarray of detector IDs (strings), shape (D,)
             - "dt_minutes": int, here always 5
@@ -389,6 +391,12 @@ def load_missingness_features(
         )
 
     Phi = np.load(phi_path)
+
+    # Sanity check: Phi should be a 3D (T, D, K) tensor
+    if Phi.ndim != 3:
+        raise ValueError(
+            f"Expected Phi to have 3 dimensions (T, D, K), got shape {Phi.shape}."
+        )
 
     meta: Dict[str, Any] = {}
 
