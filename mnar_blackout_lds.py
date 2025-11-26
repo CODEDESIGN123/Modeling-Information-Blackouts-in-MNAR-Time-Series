@@ -370,6 +370,7 @@ class MNARBlackoutLDS:
         phi_steps: int = 5,
         phi_lr: float = 1e-3,
         verbose: bool = True,
+        convergence_tol: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Run EM (approximate) for the MNAR LDS on a single sequence.
@@ -408,6 +409,10 @@ class MNARBlackoutLDS:
             Learning rate for phi updates.
         verbose : bool
             If True, print progress each iteration.
+        convergence_tol : Optional[float]
+            If not None, perform early stopping when the maximum
+            relative change in {A, C, phi} between successive
+            iterations drops below this threshold.
 
         Returns
         -------
@@ -577,6 +582,23 @@ class MNARBlackoutLDS:
                     phi_new[d] = phi_d
 
             # ------------------------------------------------
+            # Compute relative parameter change (for early stop)
+            # ------------------------------------------------
+            max_rel_change = None
+            if convergence_tol is not None and it > 0:
+                # Helper to compute relative Frobenius change
+                def _rel_change(new: np.ndarray, old: np.ndarray) -> float:
+                    num = np.linalg.norm(new - old)
+                    denom = np.linalg.norm(old) + 1e-8
+                    return num / denom
+
+                prev_params = self.params
+                delta_A = _rel_change(A_new, prev_params.A)
+                delta_C = _rel_change(C_new, prev_params.C)
+                delta_phi = _rel_change(phi_new, prev_params.phi)
+                max_rel_change = max(delta_A, delta_C, delta_phi)
+
+            # ------------------------------------------------
             # Update the parameter container
             # ------------------------------------------------
             self.params = MNARParams(
@@ -601,6 +623,23 @@ class MNARBlackoutLDS:
                 print(f"  A norm: {np.linalg.norm(A_new):.3f}")
                 print(f"  Q trace: {np.trace(Q_new):.3f}")
                 print(f"  mean diag(R): {mean_R:.3f}")
+                if max_rel_change is not None:
+                    print(f"  max relative param change: {max_rel_change:.3e}")
+
+            # ------------------------------------------------
+            # Early stopping condition
+            # ------------------------------------------------
+            if (
+                convergence_tol is not None
+                and max_rel_change is not None
+                and max_rel_change < convergence_tol
+            ):
+                if verbose:
+                    print(
+                        f"  Early stopping at iter {it + 1} "
+                        f"(Δ={max_rel_change:.3e} < tol={convergence_tol:.1e})"
+                    )
+                break
 
         return history
 
