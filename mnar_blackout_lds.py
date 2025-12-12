@@ -264,8 +264,18 @@ class MNARBlackoutLDS:
             # Innovation covariance: S_y = J Σ J^T + R
             S_y = J @ Sigma_t_pred @ J.T + R_t
 
+            # Add a small jitter and use robust inverse (handle singular / ill-conditioned)
+            eps = 1e-6
+            S_y_reg = S_y + eps * np.eye(S_y.shape[0], dtype=float)
+            try:
+                S_y_inv = np.linalg.inv(S_y_reg)
+            except np.linalg.LinAlgError:
+                # Fallback to pseudo-inverse if still singular
+                S_y_inv = np.linalg.pinv(S_y_reg)
+
             # Kalman gain: K_t = Σ J^T S_y^{-1}
-            K_t = Sigma_t_pred @ J.T @ np.linalg.inv(S_y)
+            K_t = Sigma_t_pred @ J.T @ S_y_inv
+
 
             # Innovation: (y - h(z_pred))
             innov = y - h
@@ -333,10 +343,20 @@ class MNARBlackoutLDS:
         for t in range(T - 2, -1, -1):
             # Smoother gain:
             #   F_t = Σ_{t|t} A^T (Σ_{t+1|t})^{-1}
-            Sigma_f = Sigma_filt[t]            # (K, K)
+            Sigma_f = Sigma_filt[t]              # (K, K)
             Sigma_pred_next = Sigma_pred[t + 1]  # (K, K)
 
-            F_t = Sigma_f @ A.T @ np.linalg.inv(Sigma_pred_next)
+            # Regularize and robustly invert Σ_{t+1|t}
+            eps = 1e-6
+            Sigma_pred_next_reg = Sigma_pred_next + eps * np.eye(Sigma_pred_next.shape[0], dtype=float)
+            try:
+                Sigma_pred_next_inv = np.linalg.inv(Sigma_pred_next_reg)
+            except np.linalg.LinAlgError:
+                Sigma_pred_next_inv = np.linalg.pinv(Sigma_pred_next_reg)
+
+            # Smoother gain:
+            #   F_t = Σ_{t|t} A^T (Σ_{t+1|t})^{-1}
+            F_t = Sigma_f @ A.T @ Sigma_pred_next_inv
 
             # Mean update:
             #   μ_{t|T} = μ_{t|t} + F_t (μ_{t+1|T} - μ_{t+1|t})

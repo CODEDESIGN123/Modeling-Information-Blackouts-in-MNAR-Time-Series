@@ -33,41 +33,60 @@ def load_panel(
     return_meta: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any] | None]:
     """
-    Load the cleaned Seattle Loop panel and return (x_t, m_t)
+    Load a cleaned traffic panel and return (x_t, m_t).
 
-    Let:
-        - T = number of time steps (5-minute intervals over 2015)
-        - D = number of detectors
+    Preferred generic interface (dataset-agnostic):
+        - data_dir/x_t_nan.npy      : float array, shape (T, D), NaN = missing
+        - data_dir/m_t.npy          : uint8 array, shape (T, D), 1 = missing
+        - data_dir/timestamps.npy   : optional, shape (T,)
+        - data_dir/detector_ids.npy : optional, shape (D,)
 
-    We represent:
-        x_t[t, d] = observed speed at time index t for detector d
-                    (float, NaN if missing)
-        m_t[t, d] = 1 if the reading is missing at (t, d), else 0
-
-    Parameters
-    ----------
-    data_dir : str or Path
-        Directory containing 'seattle_loop_clean.parquet'
-        and/or 'seattle_loop_clean.pkl'.
-    return_meta : bool
-        If True, also return a metadata dict with timestamps and detector IDs.
-
-    Returns
-    -------
-    x_t : np.ndarray, shape (T, D), dtype=float
-        Speed values on a strict 5-minute grid. NaN denotes missing.
-    m_t : np.ndarray, shape (T, D), dtype=np.uint8
-        Binary missingness matrix: 1 = missing, 0 = observed.
-    meta : dict or None
-        Always returned as the third element. When ``return_meta`` is
-        False, this is ``None``. When ``return_meta`` is True, this
-        dict contains:
-            - "timestamps": np.ndarray of pandas.Timestamp, shape (T,)
-            - "detectors":  np.ndarray of detector IDs (strings), shape (D,)
-            - "dt_minutes": int, here always 5
+    If x_t_nan.npy is not found, fall back to the original Seattle
+    Loop parquet/pickle interface.
     """
     data_dir = Path(data_dir)
 
+    # --- Preferred: generic .npy interface (Seattle, METR-LA, PEMS-BAY, ...) ---
+    x_np_path = data_dir / "x_t_nan.npy"
+    m_np_path = data_dir / "m_t.npy"
+    ts_path = data_dir / "timestamps.npy"
+    det_path = data_dir / "detector_ids.npy"
+
+    if x_np_path.exists():
+        # Any dataset that exports x_t_nan.npy (+ optional m_t/timestamps/detector_ids)
+        # can be loaded through the same interface.
+        x_t = np.load(x_np_path)  # shape (T, D)
+
+        if m_np_path.exists():
+            m_t = np.load(m_np_path).astype(np.uint8)
+        else:
+            m_t = np.isnan(x_t).astype(np.uint8)
+
+        if not return_meta:
+            return x_t, m_t, None
+
+        T, D = x_t.shape
+
+        if ts_path.exists():
+            timestamps = np.load(ts_path, allow_pickle=True)
+        else:
+            # Fall back to integer indices if no timestamps provided
+            timestamps = np.arange(T)
+
+        if det_path.exists():
+            detectors = np.load(det_path, allow_pickle=True).astype(str)
+        else:
+            # Generic detector labels if none provided
+            detectors = np.array([f"det_{d}" for d in range(D)], dtype=str)
+
+        meta = {
+            "timestamps": timestamps,
+            "detectors": detectors,
+            "dt_minutes": DT_MINUTES,
+        }
+        return x_t, m_t, meta
+
+    # --- Fallback: original Seattle Loop parquet / pickle interface ---
     panel_path_parquet = data_dir / "seattle_loop_clean.parquet"
     panel_path_pickle = data_dir / "seattle_loop_clean.pkl"
 
@@ -78,11 +97,12 @@ def load_panel(
         # Fallback to parquet only if needed
         wide = pd.read_parquet(panel_path_parquet)
     else:
-        raise FileNotFoundError("No seattle_loop_clean parquet/pkl found")
+        raise FileNotFoundError(
+            f"No seattle_loop_clean parquet/pkl or x_t_nan.npy found under {data_dir}"
+        )
 
     # Ensure deterministic column order (whatever is in the file)
     wide = wide.sort_index()  # sort by time
-    # wide.columns is already the detector list, in fixed order
 
     # x_t: numeric values with NaNs for missing entries
     x_t = wide.to_numpy(dtype=float)  # shape (T, D)
@@ -93,8 +113,8 @@ def load_panel(
     if not return_meta:
         return x_t, m_t, None
 
-    timestamps = wide.index.to_numpy()          # shape (T,)
-    detectors = wide.columns.to_numpy(dtype=str)  # shape (D,)
+    timestamps = wide.index.to_numpy()              # shape (T,)
+    detectors = wide.columns.to_numpy(dtype=str)    # shape (D,)
 
     meta = {
         "timestamps": timestamps,
@@ -105,6 +125,38 @@ def load_panel(
     return x_t, m_t, meta
 
 
+
+def load_metr_la_panel(h5_path: str | Path) -> pd.DataFrame:
+    """
+    Load METR-LA.h5 and return a clean time × sensor panel.
+
+    Rows: 5-minute timestamps (DatetimeIndex)
+    Columns: sensor IDs as strings
+    Values: speeds in mph (float32), NaNs for missing/invalid.
+    """
+    h5_path = Path(h5_path)
+
+    # 1) Read DataFrame from HDF5
+    df = pd.read_hdf(h5_path, key="df")
+
+    # 2) Clean index
+    df = df.sort_index()
+    df.index = pd.DatetimeIndex(df.index.values)
+    df.index.name = "timestamp"
+
+    # 3) Enforce strict 5-minute grid
+    full_index = pd.date_range(
+        start=df.index.min(),
+        end=df.index.max(),
+        freq="5min"
+    )
+    df = df.reindex(full_index)
+
+    # 4) Clean values
+    df = df.astype("float32")
+    df[df <= 0] = np.nan
+
+    return df
 # ------------------------------------------------------------
 # 2. Helper: observed-set indices O_t
 # ------------------------------------------------------------
