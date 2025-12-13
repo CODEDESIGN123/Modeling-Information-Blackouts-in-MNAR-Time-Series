@@ -64,10 +64,10 @@ class MNARParams:
         """
         rng = np.random.default_rng(seed)
 
-        # Randomly stable-ish A (shrink towards identity)
-        A = np.eye(K) + 0.05 * rng.standard_normal((K, K))
-        # Process noise (diagonal for simplicity)
-        Q_diag = 0.1 * np.ones(K, dtype=float)
+        # Randomly stable-ish A (shrink towards identity, smaller noise)
+        A = np.eye(K) + 0.02 * rng.standard_normal((K, K))
+        # Process noise (diagonal for simplicity, smaller variance)
+        Q_diag = 0.05 * np.ones(K, dtype=float)
         Q = np.diag(Q_diag)
 
         # Emission matrix C: map K-dim latent state to D detectors
@@ -174,6 +174,15 @@ class MNARBlackoutLDS:
             mu_t_pred = A @ mu_prev
             Sigma_t_pred = A @ Sigma_prev @ A.T + Q
 
+            # Re-symmetrize and cap covariance to avoid blow-ups
+            Sigma_t_pred = 0.5 * (Sigma_t_pred + Sigma_t_pred.T)
+            # Clip diagonal (variance) into a reasonable band
+            diag = np.clip(np.diag(Sigma_t_pred), 1e-6, 1e3)
+            Sigma_t_pred = (
+                Sigma_t_pred
+                - np.diag(np.diag(Sigma_t_pred))
+                + np.diag(diag)
+            )
             # Save prediction before seeing time t data
             mu_pred[t] = mu_t_pred
             Sigma_pred[t] = Sigma_t_pred
@@ -213,6 +222,8 @@ class MNARBlackoutLDS:
             # where phi has shape (D, K) and mu_t_pred has shape (K,).
             u_m = phi @ mu_t_pred                        # (D,)
             pi = _sigmoid(u_m)                           # (D,) = P(m=1)
+            # Clamp away from exact 0/1 to keep variances non-degenerate
+            pi = np.clip(pi, 1e-4, 1.0 - 1e-4)
             # Gradient of sigmoid wrt z:  pi*(1-pi) * phi_d
             # Shape: (D, K)
             g = (pi * (1.0 - pi))[:, None] * phi
@@ -264,13 +275,12 @@ class MNARBlackoutLDS:
             # Innovation covariance: S_y = J Σ J^T + R
             S_y = J @ Sigma_t_pred @ J.T + R_t
 
-            # Add a small jitter and use robust inverse (handle singular / ill-conditioned)
+            # Add jitter and use robust inverse (handle singular / ill-conditioned)
             eps = 1e-6
             S_y_reg = S_y + eps * np.eye(S_y.shape[0], dtype=float)
             try:
                 S_y_inv = np.linalg.inv(S_y_reg)
             except np.linalg.LinAlgError:
-                # Fallback to pseudo-inverse if still singular
                 S_y_inv = np.linalg.pinv(S_y_reg)
 
             # Kalman gain: K_t = Σ J^T S_y^{-1}
@@ -283,7 +293,14 @@ class MNARBlackoutLDS:
             # Filtered state mean and covariance
             mu_t_filt = mu_t_pred + K_t @ innov
             Sigma_t_filt = (I_K - K_t @ J) @ Sigma_t_pred
-
+            # Re-symmetrize and cap variance after update
+            Sigma_t_filt = 0.5 * (Sigma_t_filt + Sigma_t_filt.T)
+            diag_f = np.clip(np.diag(Sigma_t_filt), 1e-6, 1e3)
+            Sigma_t_filt = (
+                Sigma_t_filt
+                - np.diag(np.diag(Sigma_t_filt))
+                + np.diag(diag_f)
+            )
             # Save filtered posterior
             mu_filt[t] = mu_t_filt
             Sigma_filt[t] = Sigma_t_filt
@@ -348,7 +365,10 @@ class MNARBlackoutLDS:
 
             # Regularize and robustly invert Σ_{t+1|t}
             eps = 1e-6
-            Sigma_pred_next_reg = Sigma_pred_next + eps * np.eye(Sigma_pred_next.shape[0], dtype=float)
+            Sigma_pred_next_reg = (
+                0.5 * (Sigma_pred_next + Sigma_pred_next.T)
+                + eps * np.eye(Sigma_pred_next.shape[0], dtype=float)
+            )
             try:
                 Sigma_pred_next_inv = np.linalg.inv(Sigma_pred_next_reg)
             except np.linalg.LinAlgError:
@@ -515,14 +535,14 @@ class MNARBlackoutLDS:
                 Q_accum += term
 
             Q_new = Q_accum / (T - 1)
-            
+
             # Symmetrize and add jitter for numerical stability
             Q_new = 0.5 * (Q_new + Q_new.T)
             Q_new += 1e-6 * np.eye(K)
 
-            # --- Regularization: shrink Q toward an isotropic prior and cap its scale ---
-            lam_Q = 0.3          # how much to pull Q toward the prior; tune if needed
-            Q_prior = 0.1 * np.eye(K)  # prior process noise level
+            # --- Stronger regularization: shrink Q toward an isotropic prior and cap its scale ---
+            lam_Q = 0.5                 # more pull toward prior
+            Q_prior = 0.05 * np.eye(K)  # slightly smaller prior noise
             Q_new = (1.0 - lam_Q) * Q_new + lam_Q * Q_prior
 
             # Cap the overall scale of Q to avoid exploding dynamics
@@ -714,8 +734,8 @@ class MNARBlackoutLDS:
         # (T, K) @ (K, D)^T  => (T, D)
         x_hat = mu_smooth @ C.T
 
-        cov = C @ Sigma_smooth @ C.T + self.params.R
-
+        # Covariance per time step: cov[t] = C Σ_t C^T + R
+        cov = np.einsum("dk, tik, lk -> tdl", C, Sigma_smooth, C) + self.params.R
         return x_hat, cov
 
     def k_step_forecast(
